@@ -2,9 +2,17 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'aisdr.db');
-const dbDir = path.dirname(DB_PATH);
-if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+// Try DB_PATH, then local data dir, then /tmp as last resort
+let DB_PATH = process.env.DB_PATH || path.join(__dirname, 'data', 'aisdr.db');
+try {
+  const dbDir = path.dirname(DB_PATH);
+  if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+  // Test write access
+  fs.accessSync(dbDir, fs.constants.W_OK);
+} catch (e) {
+  console.log(`Cannot use ${DB_PATH}, falling back to /tmp: ${e.message}`);
+  DB_PATH = '/tmp/aisdr.db';
+}
 const db = new Database(DB_PATH);
 
 db.pragma('journal_mode = WAL');
