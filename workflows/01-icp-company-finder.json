@@ -1,0 +1,339 @@
+{
+  "name": "01 - ICP Company Finder",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-800, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "client-name",
+              "name": "client_name",
+              "value": "ph6 Coffee / Imago Trading Vietnam",
+              "type": "string"
+            },
+            {
+              "id": "icp-industry",
+              "name": "icp_industry",
+              "value": "Coffee importers, private-label coffee brands, cafe chains, specialty coffee distributors",
+              "type": "string"
+            },
+            {
+              "id": "icp-geography",
+              "name": "icp_geography",
+              "value": "Europe, Australia, Asia, Middle East",
+              "type": "string"
+            },
+            {
+              "id": "icp-company-size",
+              "name": "icp_company_size",
+              "value": "SME to mid-sized (10-500 employees)",
+              "type": "string"
+            },
+            {
+              "id": "icp-keywords",
+              "name": "icp_keywords",
+              "value": "coffee importer, coffee buyer, wholesale coffee, coffee trader, private label coffee, green coffee, roasted coffee wholesale, specialty coffee supplier, coffee distributor",
+              "type": "string"
+            },
+            {
+              "id": "target-count",
+              "name": "target_company_count",
+              "value": 100,
+              "type": "number"
+            },
+            {
+              "id": "exclude-regions",
+              "name": "exclude_regions",
+              "value": "Vietnam, domestic",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "id": "config-1",
+      "name": "Campaign Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Generate search queries for finding ICP companies\nconst config = $input.first().json;\nconst keywords = config.icp_keywords.split(',').map(k => k.trim());\nconst regions = config.icp_geography.split(',').map(r => r.trim());\n\nconst queries = [];\n\n// Generate targeted search queries\nfor (const keyword of keywords) {\n  for (const region of regions) {\n    queries.push({\n      query: `\"${keyword}\" \"${region}\" site:linkedin.com/company`,\n      source: 'linkedin',\n      keyword,\n      region\n    });\n    queries.push({\n      query: `\"${keyword}\" \"${region}\" -site:linkedin.com`,\n      source: 'web',\n      keyword,\n      region\n    });\n  }\n}\n\n// Add industry-specific directories\nconst directoryQueries = [\n  { query: 'coffee importers directory Europe', source: 'directory', keyword: 'directory', region: 'Europe' },\n  { query: 'SCA members list specialty coffee', source: 'directory', keyword: 'SCA', region: 'Global' },\n  { query: 'coffee buyers wholesale Australia', source: 'directory', keyword: 'wholesale', region: 'Australia' },\n  { query: 'coffee trade association members', source: 'directory', keyword: 'trade association', region: 'Global' },\n  { query: 'private label coffee brands Europe', source: 'directory', keyword: 'private label', region: 'Europe' },\n  { query: 'cafe chain coffee supplier Middle East', source: 'directory', keyword: 'cafe chain', region: 'Middle East' },\n  { query: 'green coffee importers list', source: 'directory', keyword: 'importers list', region: 'Global' },\n  { query: 'World of Coffee exhibitors list', source: 'directory', keyword: 'WoC exhibitors', region: 'Global' }\n];\n\nqueries.push(...directoryQueries);\n\nreturn queries.map(q => ({ json: q }));"
+      },
+      "id": "search-queries-1",
+      "name": "Generate Search Queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "batch-1",
+      "name": "Batch Queries",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.search.brave.com/res/v1/web/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "={{ $json.query }}"
+            },
+            {
+              "name": "count",
+              "value": "20"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-Subscription-Token",
+              "value": "={{ $env.BRAVE_API_KEY }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true
+            }
+          }
+        }
+      },
+      "id": "brave-search-1",
+      "name": "Brave Web Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 3
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Extract company information from search results\nconst results = $input.all();\nconst companies = [];\nconst seen = new Set();\n\nfor (const result of results) {\n  const webResults = result.json?.web?.results || [];\n  \n  for (const r of webResults) {\n    const url = r.url || '';\n    const title = r.title || '';\n    const description = r.description || '';\n    \n    // Extract company name from various patterns\n    let companyName = '';\n    let website = '';\n    let linkedinUrl = '';\n    \n    if (url.includes('linkedin.com/company/')) {\n      // Extract from LinkedIn\n      const match = url.match(/linkedin\\.com\\/company\\/([^/]+)/);\n      if (match) {\n        companyName = title.replace(/\\s*[-|].*$/, '').replace(/\\s*\\|.*$/, '').trim();\n        linkedinUrl = url;\n      }\n    } else {\n      // Extract from web results\n      companyName = title.replace(/\\s*[-|].*$/, '').replace(/\\s*\\|.*$/, '').trim();\n      website = url;\n    }\n    \n    if (!companyName || companyName.length < 3) continue;\n    \n    const key = companyName.toLowerCase().replace(/[^a-z0-9]/g, '');\n    if (seen.has(key)) continue;\n    seen.add(key);\n    \n    companies.push({\n      company_name: companyName,\n      website: website,\n      linkedin_url: linkedinUrl,\n      description: description.substring(0, 300),\n      source_query: result.json?.query || 'unknown',\n      source_type: result.json?.source || 'web',\n      region: result.json?.region || 'unknown',\n      found_at: new Date().toISOString()\n    });\n  }\n}\n\nreturn companies.map(c => ({ json: c }));"
+      },
+      "id": "extract-companies-1",
+      "name": "Extract Companies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// AI-powered ICP scoring using Claude\nconst companies = $input.all().map(i => i.json);\n\nconst prompt = `You are an ICP (Ideal Customer Profile) scoring expert for B2B coffee industry outreach.\n\nOur client: Imago Trading Vietnam / ph6 Coffee\n- Premium industrial coffee roastery in Da Nang, Vietnam\n- PROBAT P60 automated roasting system\n- 40-50 MT/month capacity\n- USP: 30-40% lower landed costs vs European-roasted coffee\n- Target: SME to mid-sized B2B coffee importers, private-label brands, cafe chains\n- Geography: Europe, Australia, Asia, Middle East\n\nScore each company 1-100 based on:\n- Industry fit (coffee importer/buyer/distributor/cafe chain)\n- Size fit (SME to mid-sized)\n- Geographic fit (priority: Europe > Australia > Middle East > Asia)\n- Likely need for origin-roasted coffee supply\n- Purchasing power indicators\n\nReturn ONLY a JSON array with objects: {company_name, icp_score, reasoning, priority_tier}\npriority_tier: \"A\" (80-100), \"B\" (60-79), \"C\" (40-59), \"D\" (below 40)\n\nCompanies to score:\n${JSON.stringify(companies.slice(0, 50), null, 2)}`;\n\n// This would call Claude API - placeholder for the HTTP request node that follows\nreturn [{ json: { prompt, company_count: companies.length, companies } }];"
+      },
+      "id": "icp-scoring-prep-1",
+      "name": "Prepare ICP Scoring",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{ $env.ANTHROPIC_API_KEY }}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 4096,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.prompt) }}\n    }\n  ]\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "claude-scoring-1",
+      "name": "Claude ICP Scoring",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parse Claude's scoring response and merge with company data\nconst response = $input.first().json;\nconst content = response.content?.[0]?.text || '';\n\n// Extract JSON from Claude's response\nlet scores = [];\ntry {\n  const jsonMatch = content.match(/\\[\\s*\\{[\\s\\S]*\\}\\s*\\]/);\n  if (jsonMatch) {\n    scores = JSON.parse(jsonMatch[0]);\n  }\n} catch (e) {\n  // If parsing fails, return companies without scores\n  const prevData = $('Extract Companies').all();\n  return prevData.map(item => ({\n    json: {\n      ...item.json,\n      icp_score: 50,\n      priority_tier: 'C',\n      scoring_error: 'Failed to parse AI scoring'\n    }\n  }));\n}\n\n// Merge scores with company data\nconst prevCompanies = $('Extract Companies').all().map(i => i.json);\nconst scoreMap = new Map(scores.map(s => [s.company_name?.toLowerCase(), s]));\n\nconst enriched = prevCompanies.map(company => {\n  const score = scoreMap.get(company.company_name?.toLowerCase()) || {};\n  return {\n    json: {\n      ...company,\n      icp_score: score.icp_score || 50,\n      priority_tier: score.priority_tier || 'C',\n      scoring_reasoning: score.reasoning || '',\n      status: 'scored',\n      pipeline_stage: 'company_found'\n    }\n  };\n});\n\n// Sort by ICP score descending, return top companies\nreturn enriched\n  .sort((a, b) => (b.json.icp_score || 0) - (a.json.icp_score || 0))\n  .filter(c => c.json.icp_score >= 40); // Only keep C tier and above"
+      },
+      "id": "merge-scores-1",
+      "name": "Merge & Filter Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [960, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "mode": "url",
+          "value": "={{ $env.AIRTABLE_BASE_ID }}"
+        },
+        "tableId": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Companies"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["company_name"]
+        },
+        "options": {}
+      },
+      "id": "airtable-companies-1",
+      "name": "Save to Airtable - Companies",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1180, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.priority_tier }}",
+              "rightValue": "A",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "tier-a-filter-1",
+      "name": "Filter Tier A",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1180, 100]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Trigger the Org Chart Mapper workflow for Tier A companies first\nconst companies = $input.all();\nreturn companies.map(c => ({\n  json: {\n    ...c.json,\n    trigger_org_mapper: true,\n    contacts_needed: 3,\n    target_roles: ['Procurement Head', 'Coffee Buyer', 'Category Manager', 'Head of Purchasing', 'Supply Chain Director', 'Sourcing Manager']\n  }\n}));"
+      },
+      "id": "prep-org-trigger-1",
+      "name": "Prep for Org Mapping",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1400, 100]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [{ "node": "Campaign Config", "type": "main", "index": 0 }]
+      ]
+    },
+    "Campaign Config": {
+      "main": [
+        [{ "node": "Generate Search Queries", "type": "main", "index": 0 }]
+      ]
+    },
+    "Generate Search Queries": {
+      "main": [
+        [{ "node": "Batch Queries", "type": "main", "index": 0 }]
+      ]
+    },
+    "Batch Queries": {
+      "main": [
+        [{ "node": "Brave Web Search", "type": "main", "index": 0 }]
+      ]
+    },
+    "Brave Web Search": {
+      "main": [
+        [{ "node": "Extract Companies", "type": "main", "index": 0 }]
+      ]
+    },
+    "Extract Companies": {
+      "main": [
+        [
+          { "node": "Prepare ICP Scoring", "type": "main", "index": 0 },
+          { "node": "Filter Tier A", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Prepare ICP Scoring": {
+      "main": [
+        [{ "node": "Claude ICP Scoring", "type": "main", "index": 0 }]
+      ]
+    },
+    "Claude ICP Scoring": {
+      "main": [
+        [{ "node": "Merge & Filter Scores", "type": "main", "index": 0 }]
+      ]
+    },
+    "Merge & Filter Scores": {
+      "main": [
+        [
+          { "node": "Save to Airtable - Companies", "type": "main", "index": 0 },
+          { "node": "Filter Tier A", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Filter Tier A": {
+      "main": [
+        [{ "node": "Prep for Org Mapping", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    { "name": "Harvey SDR" },
+    { "name": "Prospecting" }
+  ]
+}

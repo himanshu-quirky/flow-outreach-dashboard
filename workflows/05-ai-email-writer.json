@@ -1,0 +1,173 @@
+{
+  "name": "05 - AI Email Writer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "write-email",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-writer-1",
+      "name": "Webhook - Write Email",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-800, 300],
+      "webhookId": "write-email-webhook"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "client-brand",
+              "name": "client_brand",
+              "value": "Imago Trading Vietnam / ph6 Coffee",
+              "type": "string"
+            },
+            {
+              "id": "client-usp",
+              "name": "client_usp",
+              "value": "German PROBAT P60 automated roasting in Vietnam. 40-50 MT/month capacity. 30-40% lower landed costs vs European-roasted coffee. Direct access to Vietnamese origin coffee. Consistent batch quality through automated precision roasting.",
+              "type": "string"
+            },
+            {
+              "id": "client-proof",
+              "name": "client_proof_points",
+              "value": "PROBAT P60 roasting system (used by leading European roasters). Current throughput 25 MT/month scaling to 50 MT. Based in Da Nang, Vietnam - direct origin access. Standardized roasting precision eliminates quality variance.",
+              "type": "string"
+            },
+            {
+              "id": "tone",
+              "name": "desired_tone",
+              "value": "Warm, confident, and data-driven. Professional yet conversational. Clear focus on credibility and real numbers. Never overly salesy.",
+              "type": "string"
+            },
+            {
+              "id": "avoid",
+              "name": "topics_to_avoid",
+              "value": "Internal restructuring. Investor arrangements. Operational constraints. Guaranteed performance/ROI claims. Naming competitors. Unverified certifications.",
+              "type": "string"
+            },
+            {
+              "id": "cta",
+              "name": "default_cta",
+              "value": "Would you be open to reviewing samples?",
+              "type": "string"
+            },
+            {
+              "id": "max-words",
+              "name": "max_email_words",
+              "value": 120,
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "client-config-1",
+      "name": "Client Voice Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Build the master email writing prompt for Claude\nconst config = $input.first().json;\nconst contacts = $('Webhook - Write Email').all();\nconst results = [];\n\nfor (const item of contacts) {\n  const c = item.json;\n  \n  // Build email sequence (4 emails)\n  const sequencePrompt = `You are Harvey Spectre, the world's most effective cold email writer. You write emails that sound like they came from a real human who genuinely researched the prospect - never templated, never salesy, always specific.\n\nCLIENT BRAND: ${config.client_brand}\nCLIENT USP: ${config.client_usp}\nPROOF POINTS: ${config.client_proof_points}\nDESIRED TONE: ${config.desired_tone}\nTOPICS TO AVOID: ${config.topics_to_avoid}\nMAX WORDS PER EMAIL: ${config.max_email_words}\n\nPROSPECT INTELLIGENCE:\n- Name: ${c.full_name}\n- Title: ${c.job_title}\n- Company: ${c.company_name}\n- Contact Rank: ${c.contact_rank || 1} (1=primary decision maker, 2=secondary, 3=tertiary)\n- Personal Hook: ${c.personal_hook || 'N/A'}\n- Company Trigger: ${c.company_trigger || 'N/A'}\n- Pain Hypothesis: ${c.pain_hypothesis || 'Sourcing consistent quality coffee at scale with competitive pricing'}\n- Connection Angle: ${c.connection_angle || 'Origin-roasted coffee at 30-40% lower costs'}\n- Recommended Tone: ${c.recommended_tone || 'data-driven'}\n- Ice Breaker: ${c.ice_breaker || ''}\n- Research Confidence: ${c.research_confidence || 'low'}\n\nWRITE A 4-EMAIL SEQUENCE:\n\nEmail 1 (Initial outreach - Day 0):\n- Use PAS framework (Problem-Agitate-Solve)\n- Open with the personal hook or ice breaker if available\n- ONE specific pain point connected to their role\n- ONE proof point\n- Soft CTA: \"Would you be open to reviewing samples?\" or similar\n- 50-100 words, plain text, no links\n\nEmail 2 (Follow-up 1 - Day 3):\n- Reference Email 1 briefly (\"Sent you a note about...\")\n- NEW angle or proof point not mentioned in Email 1\n- Add a data point or social proof\n- Same soft CTA\n- 40-80 words\n\nEmail 3 (Follow-up 2 - Day 10):\n- Completely different angle\n- Share an industry insight or market trend\n- Connect it back to the offer\n- 40-80 words\n\nEmail 4 (Breakup - Day 17):\n- Permission-based close\n- \"Seems like timing isn't right - totally understand\"\n- Leave door open\n- 30-60 words\n\nRULES:\n- NEVER use \"I hope this email finds you well\" or any filler\n- NEVER use exclamation marks\n- NEVER use corporate buzzwords (synergy, leverage, optimize, etc.)\n- First name only in greeting (\"Hi Sarah,\" not \"Dear Ms. Johnson\")\n- No HTML, no images, no bold/italic\n- Maximum ONE link in the entire sequence (preferably zero)\n- Each email must be standalone (recipient may not have read previous ones)\n- Sound like a real person, not a marketing bot\n- Use short sentences. Punchy.\n- Subject lines: 3-6 words, lowercase, no punctuation hype\n\nReturn as JSON:\n{\n  \"emails\": [\n    {\n      \"sequence_number\": 1,\n      \"send_day\": 0,\n      \"subject\": \"subject line here\",\n      \"body\": \"email body here\",\n      \"word_count\": 85,\n      \"framework\": \"PAS\"\n    },\n    ...\n  ]\n}\n\nReturn ONLY the JSON, no markdown formatting.`;\n\n  results.push({\n    json: {\n      ...c,\n      email_prompt: sequencePrompt,\n      client_config: config\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "build-prompt-1",
+      "name": "Build Email Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": { "reset": false }
+      },
+      "id": "batch-writes-1",
+      "name": "Batch Email Writes",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 2048,\n  \"temperature\": 0.7,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.email_prompt) }}\n    }\n  ]\n}",
+        "options": { "timeout": 90000 }
+      },
+      "id": "claude-writer-1",
+      "name": "Claude - Email Writer",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parse email sequence and create individual email records\nconst items = $input.all();\nconst contacts = $('Build Email Prompt').all();\nconst allEmails = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const response = items[i].json;\n  const contact = contacts[i]?.json || {};\n  const content = response.content?.[0]?.text || '';\n  \n  let emailSequence = { emails: [] };\n  try {\n    const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) {\n      emailSequence = JSON.parse(jsonMatch[0]);\n    }\n  } catch (e) {\n    // Fallback: create a basic email\n    emailSequence = {\n      emails: [{\n        sequence_number: 1,\n        send_day: 0,\n        subject: `coffee sourcing from Vietnam`,\n        body: `Hi ${contact.first_name || 'there'},\\n\\nSourcing consistent roasted coffee at scale is a challenge many buyers face. We operate a PROBAT P60 roastery in Vietnam with 40-50 MT monthly capacity at 30-40% lower landed costs than European roasters.\\n\\nWould you be open to reviewing samples?\\n\\nBest,\\nHarvey`,\n        word_count: 45,\n        framework: 'PAS'\n      }]\n    };\n  }\n  \n  // Create individual records for each email in the sequence\n  const { email_prompt, client_config, ...cleanContact } = contact;\n  \n  for (const email of emailSequence.emails || []) {\n    allEmails.push({\n      json: {\n        // Contact info\n        full_name: cleanContact.full_name,\n        email: cleanContact.email,\n        company_name: cleanContact.company_name,\n        job_title: cleanContact.job_title,\n        contact_rank: cleanContact.contact_rank || 1,\n        \n        // Email content\n        sequence_number: email.sequence_number,\n        send_day: email.send_day,\n        subject: email.subject,\n        body: email.body,\n        word_count: email.word_count,\n        framework: email.framework,\n        \n        // Status\n        status: 'draft',\n        approved: false,\n        sent: false,\n        pipeline_stage: 'email_drafted',\n        drafted_at: new Date().toISOString(),\n        \n        // Scheduling\n        scheduled_send_date: null,\n        actual_send_date: null,\n        \n        // Tracking\n        campaign_id: `${cleanContact.company_name?.replace(/[^a-zA-Z0-9]/g, '_')}_${Date.now()}`,\n        thread_id: `thread_${cleanContact.full_name?.replace(/[^a-zA-Z0-9]/g, '_')}`\n      }\n    });\n  }\n}\n\nreturn allEmails;"
+      },
+      "id": "parse-emails-1",
+      "name": "Parse Email Sequence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Emails" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["thread_id", "sequence_number"]
+        },
+        "options": {}
+      },
+      "id": "airtable-emails-1",
+      "name": "Save to Airtable - Emails",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [520, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Write Email": {
+      "main": [[{ "node": "Client Voice Config", "type": "main", "index": 0 }]]
+    },
+    "Client Voice Config": {
+      "main": [[{ "node": "Build Email Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Email Prompt": {
+      "main": [[{ "node": "Batch Email Writes", "type": "main", "index": 0 }]]
+    },
+    "Batch Email Writes": {
+      "main": [[{ "node": "Claude - Email Writer", "type": "main", "index": 0 }]]
+    },
+    "Claude - Email Writer": {
+      "main": [[{ "node": "Parse Email Sequence", "type": "main", "index": 0 }]]
+    },
+    "Parse Email Sequence": {
+      "main": [[{ "node": "Save to Airtable - Emails", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Email Writing" }]
+}

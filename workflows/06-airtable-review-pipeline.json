@@ -1,0 +1,160 @@
+{
+  "name": "06 - Airtable Review & Approval Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 5 }]
+        }
+      },
+      "id": "schedule-check-1",
+      "name": "Check Approvals Every 5min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-800, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Emails" },
+        "filterByFormula": "AND({approved} = TRUE(), {sent} = FALSE(), {sequence_number} = 1)",
+        "options": { "returnAll": true }
+      },
+      "id": "fetch-approved-1",
+      "name": "Fetch Approved Emails",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEquals" }
+            },
+            {
+              "leftValue": "={{ $json.subject }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "validate-email-1",
+      "name": "Validate Has Email & Subject",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Check multi-threading rules before sending\n// If someone from same company already responded, skip other contacts\nconst items = $input.all();\nconst staticData = $getWorkflowStaticData('global');\nconst respondedCompanies = staticData.respondedCompanies || {};\n\nconst toSend = [];\nconst skipped = [];\n\nfor (const item of items) {\n  const company = item.json.company_name?.toLowerCase() || '';\n  \n  if (respondedCompanies[company]) {\n    skipped.push({\n      json: {\n        ...item.json,\n        skip_reason: `Company already responded via ${respondedCompanies[company]}`,\n        status: 'skipped_company_responded'\n      }\n    });\n  } else {\n    toSend.push(item);\n  }\n}\n\n// Return items to send\nreturn toSend.length > 0 ? toSend : [{ json: { no_emails_to_send: true } }];"
+      },
+      "id": "multithread-check-1",
+      "name": "Multi-thread Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Format for SmartLead API campaign creation\nconst items = $input.all().filter(i => !i.json.no_emails_to_send);\n\nif (items.length === 0) return [];\n\n// Group by campaign\nconst campaigns = new Map();\n\nfor (const item of items) {\n  const campaignId = item.json.campaign_id || 'default';\n  if (!campaigns.has(campaignId)) {\n    campaigns.set(campaignId, []);\n  }\n  campaigns.get(campaignId).push(item.json);\n}\n\n// Format for SmartLead\nconst smartleadPayloads = [];\nfor (const [campaignId, emails] of campaigns) {\n  for (const email of emails) {\n    smartleadPayloads.push({\n      json: {\n        email_address: email.email,\n        first_name: email.full_name?.split(' ')[0] || '',\n        last_name: email.full_name?.split(' ').slice(1).join(' ') || '',\n        company_name: email.company_name,\n        subject: email.subject,\n        body: email.body,\n        campaign_id: campaignId,\n        thread_id: email.thread_id,\n        sequence_number: email.sequence_number,\n        airtable_record_id: email.id || email.record_id,\n        \n        // SmartLead specific fields\n        custom_fields: {\n          job_title: email.job_title || '',\n          contact_rank: email.contact_rank || 1\n        }\n      }\n    });\n  }\n}\n\nreturn smartleadPayloads;"
+      },
+      "id": "format-smartlead-1",
+      "name": "Format for SmartLead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://server.smartlead.ai/api/v1/campaigns/{{ $env.SMARTLEAD_CAMPAIGN_ID }}/leads",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api_key", "value": "={{ $env.SMARTLEAD_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"lead_list\": [\n    {\n      \"email\": {{ JSON.stringify($json.email_address) }},\n      \"first_name\": {{ JSON.stringify($json.first_name) }},\n      \"last_name\": {{ JSON.stringify($json.last_name) }},\n      \"company_name\": {{ JSON.stringify($json.company_name) }},\n      \"custom_fields\": {{ JSON.stringify($json.custom_fields) }}\n    }\n  ],\n  \"settings\": {\n    \"ignore_global_block_list\": false,\n    \"ignore_unsubscribe_list\": false\n  }\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "smartlead-add-lead-1",
+      "name": "Add Lead to SmartLead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [300, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Update Airtable records to mark as sent/queued\nconst items = $input.all();\nreturn items.map(item => ({\n  json: {\n    record_id: item.json.airtable_record_id,\n    sent: true,\n    status: 'queued_in_smartlead',\n    queued_at: new Date().toISOString(),\n    smartlead_response: item.json\n  }\n}));"
+      },
+      "id": "mark-sent-1",
+      "name": "Mark as Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Emails" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["record_id"]
+        },
+        "options": {}
+      },
+      "id": "update-airtable-sent-1",
+      "name": "Update Airtable - Sent",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [740, 300]
+    }
+  ],
+  "connections": {
+    "Check Approvals Every 5min": {
+      "main": [[{ "node": "Fetch Approved Emails", "type": "main", "index": 0 }]]
+    },
+    "Fetch Approved Emails": {
+      "main": [[{ "node": "Validate Has Email & Subject", "type": "main", "index": 0 }]]
+    },
+    "Validate Has Email & Subject": {
+      "main": [
+        [{ "node": "Multi-thread Check", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Multi-thread Check": {
+      "main": [[{ "node": "Format for SmartLead", "type": "main", "index": 0 }]]
+    },
+    "Format for SmartLead": {
+      "main": [[{ "node": "Add Lead to SmartLead", "type": "main", "index": 0 }]]
+    },
+    "Add Lead to SmartLead": {
+      "main": [[{ "node": "Mark as Sent", "type": "main", "index": 0 }]]
+    },
+    "Mark as Sent": {
+      "main": [[{ "node": "Update Airtable - Sent", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Sending" }]
+}

@@ -1,0 +1,232 @@
+{
+  "name": "02 - Org Chart Mapper & Contact Finder",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "org-mapper",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-1",
+      "name": "Webhook - New Company",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-800, 300],
+      "webhookId": "org-mapper-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Prepare search queries for The Org and LinkedIn to find decision makers\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const company = item.json;\n  const companyName = company.company_name;\n  const targetRoles = company.target_roles || [\n    'Procurement Head', 'Coffee Buyer', 'Category Manager',\n    'Head of Purchasing', 'Supply Chain Director', 'Sourcing Manager',\n    'CEO', 'Managing Director', 'Founder', 'COO'\n  ];\n\n  // The Org search\n  results.push({\n    company_name: companyName,\n    company_data: company,\n    search_type: 'theorg',\n    search_url: `https://theorg.com/api/v1/organizations/search?q=${encodeURIComponent(companyName)}`,\n    target_roles: targetRoles\n  });\n\n  // LinkedIn search queries for each role type\n  const roleGroups = [\n    ['Procurement', 'Purchasing', 'Sourcing', 'Buyer'],\n    ['Category Manager', 'Supply Chain', 'Operations'],\n    ['CEO', 'Founder', 'Managing Director', 'COO', 'Owner']\n  ];\n\n  for (const roleGroup of roleGroups) {\n    const roleQuery = roleGroup.join(' OR ');\n    results.push({\n      company_name: companyName,\n      company_data: company,\n      search_type: 'linkedin_search',\n      search_query: `site:linkedin.com/in/ \"${companyName}\" (${roleQuery})`,\n      role_group: roleGroup[0],\n      target_roles: targetRoles\n    });\n  }\n}\n\nreturn results.map(r => ({ json: r }));"
+      },
+      "id": "prep-searches-1",
+      "name": "Prepare Contact Searches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 3,
+        "options": { "reset": false }
+      },
+      "id": "batch-contacts-1",
+      "name": "Batch Contact Searches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.search_type }}",
+              "rightValue": "theorg",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "route-search-1",
+      "name": "Route by Search Type",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.search_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "User-Agent", "value": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "theorg-search-1",
+      "name": "Search The Org",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 200],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://api.search.brave.com/res/v1/web/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ $json.search_query }}" },
+            { "name": "count", "value": "10" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Subscription-Token", "value": "={{ $env.BRAVE_API_KEY }}" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "linkedin-search-1",
+      "name": "Search LinkedIn via Brave",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 420],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Extract contacts from The Org results\nconst items = $input.all();\nconst contacts = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const orgResults = data.organizations || data.results || data.data || [];\n  const companyName = data.company_name || $('Webhook - New Company').first().json.company_name;\n  \n  if (Array.isArray(orgResults)) {\n    for (const org of orgResults) {\n      const members = org.members || org.people || org.team || [];\n      for (const member of members) {\n        contacts.push({\n          full_name: member.name || `${member.first_name || ''} ${member.last_name || ''}`.trim(),\n          job_title: member.title || member.position || member.role || '',\n          company_name: companyName,\n          linkedin_url: member.linkedin_url || member.linkedin || '',\n          source: 'theorg',\n          found_at: new Date().toISOString()\n        });\n      }\n    }\n  }\n}\n\nreturn contacts.length > 0 ? contacts.map(c => ({ json: c })) : [{ json: { no_results: true } }];"
+      },
+      "id": "parse-theorg-1",
+      "name": "Parse The Org Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 200]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Extract contacts from LinkedIn search results\nconst items = $input.all();\nconst contacts = [];\n\nfor (const item of items) {\n  const webResults = item.json?.web?.results || [];\n  const companyName = item.json?.company_name || '';\n  \n  for (const r of webResults) {\n    const url = r.url || '';\n    const title = r.title || '';\n    const description = r.description || '';\n    \n    if (!url.includes('linkedin.com/in/')) continue;\n    \n    // Extract name from LinkedIn title (usually \"Name - Title - Company\")\n    const nameParts = title.split(/\\s*[-|]\\s*/);\n    const fullName = nameParts[0]?.trim() || '';\n    const jobTitle = nameParts[1]?.trim() || '';\n    \n    if (!fullName || fullName.length < 3) continue;\n    \n    contacts.push({\n      full_name: fullName,\n      job_title: jobTitle,\n      company_name: companyName,\n      linkedin_url: url,\n      description: description.substring(0, 200),\n      source: 'linkedin_search',\n      found_at: new Date().toISOString()\n    });\n  }\n}\n\nreturn contacts.length > 0 ? contacts.map(c => ({ json: c })) : [{ json: { no_results: true } }];"
+      },
+      "id": "parse-linkedin-1",
+      "name": "Parse LinkedIn Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 420]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineAll",
+        "options": {}
+      },
+      "id": "merge-contacts-1",
+      "name": "Merge All Contacts",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.1,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Deduplicate and rank contacts, pick top 3 per company\nconst items = $input.all().filter(i => !i.json.no_results);\nconst byCompany = new Map();\n\nconst rolePriority = {\n  'procurement': 10, 'purchasing': 10, 'buyer': 9, 'sourcing': 9,\n  'category manager': 8, 'supply chain': 7, 'operations': 6,\n  'ceo': 5, 'founder': 5, 'managing director': 5, 'coo': 4,\n  'director': 3, 'manager': 2, 'head': 8\n};\n\nconst scoreRole = (title) => {\n  if (!title) return 0;\n  const lower = title.toLowerCase();\n  let maxScore = 0;\n  for (const [keyword, score] of Object.entries(rolePriority)) {\n    if (lower.includes(keyword)) maxScore = Math.max(maxScore, score);\n  }\n  return maxScore;\n};\n\nfor (const item of items) {\n  const contact = item.json;\n  const company = contact.company_name?.toLowerCase() || 'unknown';\n  \n  if (!byCompany.has(company)) byCompany.set(company, []);\n  \n  // Dedupe by name\n  const existing = byCompany.get(company);\n  const nameKey = contact.full_name?.toLowerCase().replace(/[^a-z]/g, '');\n  if (existing.some(c => c.full_name?.toLowerCase().replace(/[^a-z]/g, '') === nameKey)) continue;\n  \n  contact.role_score = scoreRole(contact.job_title);\n  existing.push(contact);\n}\n\nconst finalContacts = [];\nfor (const [company, contacts] of byCompany) {\n  // Sort by role relevance, take top 3\n  const sorted = contacts.sort((a, b) => b.role_score - a.role_score);\n  const top3 = sorted.slice(0, 3);\n  \n  top3.forEach((contact, index) => {\n    finalContacts.push({\n      ...contact,\n      contact_rank: index + 1, // 1 = primary, 2 = secondary, 3 = tertiary\n      pipeline_stage: 'contact_found'\n    });\n  });\n}\n\nreturn finalContacts.map(c => ({ json: c }));"
+      },
+      "id": "dedup-rank-1",
+      "name": "Dedup & Rank Top 3",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Contacts" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["full_name", "company_name"]
+        },
+        "options": {}
+      },
+      "id": "airtable-contacts-1",
+      "name": "Save to Airtable - Contacts",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [960, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - New Company": {
+      "main": [
+        [{ "node": "Prepare Contact Searches", "type": "main", "index": 0 }]
+      ]
+    },
+    "Prepare Contact Searches": {
+      "main": [
+        [{ "node": "Batch Contact Searches", "type": "main", "index": 0 }]
+      ]
+    },
+    "Batch Contact Searches": {
+      "main": [
+        [{ "node": "Route by Search Type", "type": "main", "index": 0 }]
+      ]
+    },
+    "Route by Search Type": {
+      "main": [
+        [{ "node": "Search The Org", "type": "main", "index": 0 }],
+        [{ "node": "Search LinkedIn via Brave", "type": "main", "index": 0 }]
+      ]
+    },
+    "Search The Org": {
+      "main": [
+        [{ "node": "Parse The Org Results", "type": "main", "index": 0 }]
+      ]
+    },
+    "Search LinkedIn via Brave": {
+      "main": [
+        [{ "node": "Parse LinkedIn Results", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse The Org Results": {
+      "main": [
+        [{ "node": "Merge All Contacts", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse LinkedIn Results": {
+      "main": [
+        [{ "node": "Merge All Contacts", "type": "main", "index": 1 }]
+      ]
+    },
+    "Merge All Contacts": {
+      "main": [
+        [{ "node": "Dedup & Rank Top 3", "type": "main", "index": 0 }]
+      ]
+    },
+    "Dedup & Rank Top 3": {
+      "main": [
+        [{ "node": "Save to Airtable - Contacts", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Prospecting" }]
+}

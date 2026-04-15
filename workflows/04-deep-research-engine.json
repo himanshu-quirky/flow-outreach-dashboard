@@ -1,0 +1,177 @@
+{
+  "name": "04 - Deep Research Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "deep-research",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-research-1",
+      "name": "Webhook - Research Contact",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-800, 300],
+      "webhookId": "deep-research-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Generate deep research queries for each contact\nconst contacts = $input.all();\nconst allQueries = [];\n\nfor (const item of contacts) {\n  const c = item.json;\n  const name = c.full_name || '';\n  const company = c.company_name || '';\n  const title = c.job_title || '';\n  \n  // Research dimensions\n  const queries = [\n    // Professional background\n    {\n      query: `\"${name}\" \"${company}\" LinkedIn`,\n      dimension: 'professional_background',\n      contact: c\n    },\n    // Podcast/interview appearances\n    {\n      query: `\"${name}\" (podcast OR interview OR webinar OR panel) coffee OR procurement OR sourcing`,\n      dimension: 'media_appearances',\n      contact: c\n    },\n    // LinkedIn posts and activity\n    {\n      query: `site:linkedin.com \"${name}\" (post OR article OR shared)`,\n      dimension: 'linkedin_activity',\n      contact: c\n    },\n    // Company news and developments\n    {\n      query: `\"${company}\" (expansion OR launch OR partnership OR acquisition OR hiring) 2025 OR 2026`,\n      dimension: 'company_news',\n      contact: c\n    },\n    // Industry involvement\n    {\n      query: `\"${name}\" (conference OR summit OR award OR speaker OR judge) coffee OR food OR beverage`,\n      dimension: 'industry_involvement',\n      contact: c\n    },\n    // Pain points / challenges\n    {\n      query: `\"${company}\" (challenge OR struggle OR looking for OR seeking) coffee OR supply OR sourcing`,\n      dimension: 'pain_signals',\n      contact: c\n    }\n  ];\n  \n  allQueries.push(...queries);\n}\n\nreturn allQueries.map(q => ({ json: q }));"
+      },
+      "id": "gen-research-queries-1",
+      "name": "Generate Research Queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 6,
+        "options": { "reset": false }
+      },
+      "id": "batch-research-1",
+      "name": "Batch Research Queries",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.search.brave.com/res/v1/web/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "={{ $json.query }}" },
+            { "name": "count", "value": "10" },
+            { "name": "freshness", "value": "py" }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Subscription-Token", "value": "={{ $env.BRAVE_API_KEY }}" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "brave-research-1",
+      "name": "Brave Search - Research",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-140, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Aggregate research findings by contact\nconst items = $input.all();\nconst contactResearch = new Map();\n\nfor (const item of items) {\n  const dimension = item.json.dimension || 'unknown';\n  const contact = item.json.contact || {};\n  const contactKey = `${contact.full_name}::${contact.company_name}`;\n  const webResults = item.json.web?.results || [];\n  \n  if (!contactResearch.has(contactKey)) {\n    contactResearch.set(contactKey, {\n      contact,\n      research: {\n        professional_background: [],\n        media_appearances: [],\n        linkedin_activity: [],\n        company_news: [],\n        industry_involvement: [],\n        pain_signals: []\n      }\n    });\n  }\n  \n  const entry = contactResearch.get(contactKey);\n  const findings = webResults.map(r => ({\n    title: r.title || '',\n    url: r.url || '',\n    snippet: (r.description || '').substring(0, 300)\n  })).filter(f => f.title && f.snippet);\n  \n  if (entry.research[dimension]) {\n    entry.research[dimension].push(...findings);\n  }\n}\n\n// Format for Claude AI synthesis\nconst output = [];\nfor (const [key, data] of contactResearch) {\n  output.push({\n    json: {\n      ...data.contact,\n      raw_research: data.research,\n      research_query_count: Object.values(data.research).flat().length,\n      pipeline_stage: 'research_gathered'\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "aggregate-research-1",
+      "name": "Aggregate Research",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Prepare Claude prompt for research synthesis\nconst contacts = $input.all();\nconst results = [];\n\nfor (const item of contacts) {\n  const c = item.json;\n  const research = c.raw_research || {};\n  \n  const prompt = `You are a world-class sales intelligence researcher. Synthesize the following raw research about a prospect into actionable sales intelligence.\n\nPROSPECT:\n- Name: ${c.full_name}\n- Title: ${c.job_title}\n- Company: ${c.company_name}\n- LinkedIn: ${c.linkedin_url || 'N/A'}\n\nRAW RESEARCH FINDINGS:\n\n1. Professional Background:\n${JSON.stringify(research.professional_background?.slice(0, 5) || [], null, 2)}\n\n2. Media Appearances (podcasts, interviews, etc.):\n${JSON.stringify(research.media_appearances?.slice(0, 5) || [], null, 2)}\n\n3. LinkedIn Activity:\n${JSON.stringify(research.linkedin_activity?.slice(0, 5) || [], null, 2)}\n\n4. Company News & Developments:\n${JSON.stringify(research.company_news?.slice(0, 5) || [], null, 2)}\n\n5. Industry Involvement:\n${JSON.stringify(research.industry_involvement?.slice(0, 5) || [], null, 2)}\n\n6. Pain Signals:\n${JSON.stringify(research.pain_signals?.slice(0, 5) || [], null, 2)}\n\nSYNTHESIZE INTO:\n{\n  \"personal_hook\": \"One specific, personal detail that shows you did your homework (podcast they were on, post they wrote, event they spoke at, etc.)\",\n  \"company_trigger\": \"What's happening at their company that creates a buying window (expansion, new locations, hiring, etc.)\",\n  \"pain_hypothesis\": \"Based on their role and company context, what procurement pain are they likely experiencing?\",\n  \"connection_angle\": \"How does our offer (PROBAT P60 roasted coffee from Vietnam, 30-40% lower costs, 40-50 MT/month capacity) connect to their specific situation?\",\n  \"recommended_tone\": \"Should this email be data-driven, relationship-focused, or industry-insider based on their profile?\",\n  \"ice_breaker\": \"A natural, non-creepy opening line that references something specific about them\",\n  \"confidence_level\": \"high/medium/low - based on how much usable research was found\"\n}\n\nReturn ONLY the JSON object, no markdown.`;\n\n  results.push({\n    json: {\n      ...c,\n      synthesis_prompt: prompt\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "prep-synthesis-1",
+      "name": "Prepare AI Synthesis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-sonnet-4-6\",\n  \"max_tokens\": 1024,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": {{ JSON.stringify($json.synthesis_prompt) }}\n    }\n  ]\n}",
+        "options": { "timeout": 60000 }
+      },
+      "id": "claude-synthesis-1",
+      "name": "Claude - Research Synthesis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "maxTries": 2
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parse Claude's research synthesis\nconst items = $input.all();\nconst contacts = $('Prepare AI Synthesis').all();\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const response = items[i].json;\n  const contact = contacts[i]?.json || {};\n  const content = response.content?.[0]?.text || '';\n  \n  let synthesis = {};\n  try {\n    const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) {\n      synthesis = JSON.parse(jsonMatch[0]);\n    }\n  } catch (e) {\n    synthesis = {\n      personal_hook: '',\n      company_trigger: '',\n      pain_hypothesis: 'General procurement efficiency',\n      connection_angle: 'Cost savings through origin-roasted coffee',\n      recommended_tone: 'data-driven',\n      ice_breaker: '',\n      confidence_level: 'low'\n    };\n  }\n  \n  // Remove raw research to keep payload clean\n  const { raw_research, synthesis_prompt, ...cleanContact } = contact;\n  \n  results.push({\n    json: {\n      ...cleanContact,\n      research_synthesis: synthesis,\n      personal_hook: synthesis.personal_hook || '',\n      company_trigger: synthesis.company_trigger || '',\n      pain_hypothesis: synthesis.pain_hypothesis || '',\n      connection_angle: synthesis.connection_angle || '',\n      recommended_tone: synthesis.recommended_tone || 'professional',\n      ice_breaker: synthesis.ice_breaker || '',\n      research_confidence: synthesis.confidence_level || 'low',\n      pipeline_stage: 'research_complete',\n      researched_at: new Date().toISOString()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-synthesis-1",
+      "name": "Parse Research Synthesis",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Contacts" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["full_name", "company_name"]
+        },
+        "options": {}
+      },
+      "id": "update-research-1",
+      "name": "Update Airtable - Research",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [960, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Research Contact": {
+      "main": [[{ "node": "Generate Research Queries", "type": "main", "index": 0 }]]
+    },
+    "Generate Research Queries": {
+      "main": [[{ "node": "Batch Research Queries", "type": "main", "index": 0 }]]
+    },
+    "Batch Research Queries": {
+      "main": [[{ "node": "Brave Search - Research", "type": "main", "index": 0 }]]
+    },
+    "Brave Search - Research": {
+      "main": [[{ "node": "Aggregate Research", "type": "main", "index": 0 }]]
+    },
+    "Aggregate Research": {
+      "main": [[{ "node": "Prepare AI Synthesis", "type": "main", "index": 0 }]]
+    },
+    "Prepare AI Synthesis": {
+      "main": [[{ "node": "Claude - Research Synthesis", "type": "main", "index": 0 }]]
+    },
+    "Claude - Research Synthesis": {
+      "main": [[{ "node": "Parse Research Synthesis", "type": "main", "index": 0 }]]
+    },
+    "Parse Research Synthesis": {
+      "main": [[{ "node": "Update Airtable - Research", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Research" }]
+}

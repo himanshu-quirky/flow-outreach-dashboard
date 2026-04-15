@@ -1,0 +1,153 @@
+{
+  "name": "09 - Domain Finder & Availability Checker",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "trigger-domain-1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [-800, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "brand-name",
+              "name": "brand_name",
+              "value": "ph6coffee",
+              "type": "string"
+            },
+            {
+              "id": "brand-short",
+              "name": "brand_short",
+              "value": "ph6",
+              "type": "string"
+            },
+            {
+              "id": "domains-needed",
+              "name": "domains_needed",
+              "value": 12,
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "domain-config-1",
+      "name": "Domain Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Generate domain variations for cold email infrastructure\nconst config = $input.first().json;\nconst brand = config.brand_name;\nconst short = config.brand_short;\n\nconst prefixes = ['try', 'get', 'use', 'go', 'hq', 'with', 'meet', 'join', 'hello', 'hey'];\nconst suffixes = ['hq', 'app', 'mail', 'team', 'now', 'group', 'co'];\nconst tlds = ['.com', '.co', '.io', '.net'];\n\nconst domains = new Set();\n\n// Prefix + brand variations\nfor (const prefix of prefixes) {\n  domains.add(`${prefix}${brand}.com`);\n  domains.add(`${prefix}${short}.com`);\n}\n\n// Brand + suffix variations\nfor (const suffix of suffixes) {\n  domains.add(`${brand}${suffix}.com`);\n  domains.add(`${short}${suffix}.com`);\n}\n\n// TLD variations\nfor (const tld of tlds) {\n  domains.add(`${brand}${tld}`);\n  if (tld !== '.com') domains.add(`${short}${tld}`);\n}\n\n// Industry-specific\ndomains.add(`${short}roasters.com`);\ndomains.add(`${short}trading.com`);\ndomains.add(`${short}supply.com`);\ndomains.add(`${brand}supply.com`);\ndomains.add(`${short}origins.com`);\ndomains.add(`${brand}partners.com`);\n\nreturn Array.from(domains).map(d => ({ json: { domain: d, brand: brand } }));"
+      },
+      "id": "gen-domains-1",
+      "name": "Generate Domain Variations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": { "reset": false }
+      },
+      "id": "batch-domains-1",
+      "name": "Batch Domain Checks",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://dns.google/resolve?name={{ $json.domain }}&type=A",
+        "options": { "timeout": 10000 }
+      },
+      "id": "dns-check-1",
+      "name": "DNS Availability Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [80, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Analyze DNS results to determine availability\nconst items = $input.all();\nconst domains = $('Generate Domain Variations').all();\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const dnsResult = items[i].json;\n  const domainInfo = domains[i]?.json || {};\n  \n  // Status 3 = NXDOMAIN (domain doesn't exist = available)\n  // Status 0 = NOERROR (domain exists = taken)\n  const status = dnsResult.Status;\n  const isAvailable = status === 3;\n  const hasRecords = (dnsResult.Answer || []).length > 0;\n  \n  results.push({\n    json: {\n      domain: domainInfo.domain,\n      available: isAvailable,\n      dns_status: status,\n      has_dns_records: hasRecords,\n      registrar_check_needed: isAvailable, // Available domains should be verified at registrar\n      checked_at: new Date().toISOString()\n    }\n  });\n}\n\n// Sort: available first, then by domain name\nreturn results.sort((a, b) => {\n  if (a.json.available && !b.json.available) return -1;\n  if (!a.json.available && b.json.available) return 1;\n  return a.json.domain.localeCompare(b.json.domain);\n});"
+      },
+      "id": "analyze-availability-1",
+      "name": "Analyze Availability",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.available }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "equals" }
+            }
+          ]
+        }
+      },
+      "id": "filter-available-1",
+      "name": "Filter Available Only",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [520, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Domains" },
+        "columns": { "mappingMode": "autoMapInputData", "matchingColumns": ["domain"] },
+        "options": {}
+      },
+      "id": "save-domains-1",
+      "name": "Save to Airtable - Domains",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [740, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Domain Config", "type": "main", "index": 0 }]]
+    },
+    "Domain Config": {
+      "main": [[{ "node": "Generate Domain Variations", "type": "main", "index": 0 }]]
+    },
+    "Generate Domain Variations": {
+      "main": [[{ "node": "Batch Domain Checks", "type": "main", "index": 0 }]]
+    },
+    "Batch Domain Checks": {
+      "main": [[{ "node": "DNS Availability Check", "type": "main", "index": 0 }]]
+    },
+    "DNS Availability Check": {
+      "main": [[{ "node": "Analyze Availability", "type": "main", "index": 0 }]]
+    },
+    "Analyze Availability": {
+      "main": [[{ "node": "Filter Available Only", "type": "main", "index": 0 }]]
+    },
+    "Filter Available Only": {
+      "main": [
+        [{ "node": "Save to Airtable - Domains", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Infrastructure" }]
+}

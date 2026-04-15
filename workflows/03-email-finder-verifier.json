@@ -1,0 +1,212 @@
+{
+  "name": "03 - Email Finder & Verifier",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "email-finder",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-email-1",
+      "name": "Webhook - Find Emails",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-800, 300],
+      "webhookId": "email-finder-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// For each contact, generate email permutations and prepare verification\nconst contacts = $input.all();\nconst results = [];\n\nfor (const item of contacts) {\n  const c = item.json;\n  const nameParts = (c.full_name || '').trim().split(/\\s+/);\n  if (nameParts.length < 2) continue;\n  \n  const first = nameParts[0].toLowerCase();\n  const last = nameParts[nameParts.length - 1].toLowerCase();\n  const firstInitial = first[0];\n  const lastInitial = last[0];\n  \n  // Extract domain from website or company name\n  let domain = '';\n  if (c.website) {\n    try {\n      domain = new URL(c.website.startsWith('http') ? c.website : `https://${c.website}`).hostname.replace('www.', '');\n    } catch(e) {}\n  }\n  \n  if (!domain && c.company_name) {\n    // Guess domain from company name\n    domain = c.company_name.toLowerCase()\n      .replace(/[^a-z0-9\\s]/g, '')\n      .replace(/\\s+/g, '')\n      .substring(0, 30) + '.com';\n  }\n  \n  if (!domain) continue;\n  \n  // Common email patterns (ordered by likelihood)\n  const patterns = [\n    `${first}.${last}@${domain}`,\n    `${first}@${domain}`,\n    `${firstInitial}${last}@${domain}`,\n    `${first}${last}@${domain}`,\n    `${first}_${last}@${domain}`,\n    `${first}${lastInitial}@${domain}`,\n    `${last}.${first}@${domain}`,\n    `${last}@${domain}`\n  ];\n  \n  results.push({\n    ...c,\n    domain,\n    email_patterns: patterns,\n    first_name: nameParts[0],\n    last_name: nameParts[nameParts.length - 1],\n    pipeline_stage: 'email_lookup'\n  });\n}\n\nreturn results.map(r => ({ json: r }));"
+      },
+      "id": "gen-patterns-1",
+      "name": "Generate Email Patterns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 5,
+        "options": { "reset": false }
+      },
+      "id": "batch-emails-1",
+      "name": "Batch Email Lookups",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hunter.io/v2/email-finder",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "domain", "value": "={{ $json.domain }}" },
+            { "name": "first_name", "value": "={{ $json.first_name }}" },
+            { "name": "last_name", "value": "={{ $json.last_name }}" },
+            { "name": "api_key", "value": "={{ $env.HUNTER_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "hunter-find-1",
+      "name": "Hunter.io Email Finder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-140, 200],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.snov.io/v1/get-emails-from-names",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"firstName\": {{ JSON.stringify($json.first_name) }},\n  \"lastName\": {{ JSON.stringify($json.last_name) }},\n  \"domain\": {{ JSON.stringify($json.domain) }}\n}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.SNOV_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "snov-find-1",
+      "name": "Snov.io Email Finder",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-140, 420],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Merge results from Hunter and Snov, pick best email\nconst hunterResults = $('Hunter.io Email Finder').all();\nconst snovResults = $('Snov.io Email Finder').all();\nconst originalContacts = $('Generate Email Patterns').all();\n\nconst results = [];\n\nfor (let i = 0; i < originalContacts.length; i++) {\n  const contact = originalContacts[i].json;\n  const emails = new Map(); // email -> confidence\n  \n  // Parse Hunter result\n  const hunterData = hunterResults[i]?.json?.data;\n  if (hunterData?.email) {\n    emails.set(hunterData.email, {\n      email: hunterData.email,\n      confidence: hunterData.score || 50,\n      source: 'hunter',\n      type: hunterData.type || 'unknown'\n    });\n  }\n  \n  // Parse Snov result  \n  const snovData = snovResults[i]?.json;\n  const snovEmails = snovData?.emails || snovData?.data?.emails || [];\n  for (const se of snovEmails) {\n    const email = se.email || se;\n    if (typeof email === 'string' && email.includes('@')) {\n      const existing = emails.get(email);\n      if (existing) {\n        existing.confidence = Math.min(100, existing.confidence + 20); // Boost if found by both\n        existing.source = 'hunter+snov';\n      } else {\n        emails.set(email, {\n          email,\n          confidence: se.confidence || se.score || 40,\n          source: 'snov',\n          type: se.type || 'unknown'\n        });\n      }\n    }\n  }\n  \n  // If no emails found from APIs, use best guess from patterns\n  if (emails.size === 0) {\n    const patterns = contact.email_patterns || [];\n    if (patterns.length > 0) {\n      emails.set(patterns[0], {\n        email: patterns[0],\n        confidence: 30,\n        source: 'pattern_guess',\n        type: 'guess'\n      });\n    }\n  }\n  \n  // Pick the highest confidence email\n  const sorted = Array.from(emails.values()).sort((a, b) => b.confidence - a.confidence);\n  const bestEmail = sorted[0];\n  \n  results.push({\n    ...contact,\n    email: bestEmail?.email || '',\n    email_confidence: bestEmail?.confidence || 0,\n    email_source: bestEmail?.source || 'none',\n    email_type: bestEmail?.type || 'unknown',\n    all_emails_found: sorted.map(e => e.email),\n    pipeline_stage: bestEmail ? 'email_found' : 'email_not_found'\n  });\n}\n\nreturn results.map(r => ({ json: r }));"
+      },
+      "id": "merge-emails-1",
+      "name": "Merge & Select Best Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [120, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.email }}",
+              "rightValue": "",
+              "operator": { "type": "string", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "has-email-filter-1",
+      "name": "Has Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [340, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.hunter.io/v2/email-verifier",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "email", "value": "={{ $json.email }}" },
+            { "name": "api_key", "value": "={{ $env.HUNTER_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "verify-email-1",
+      "name": "Verify Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [560, 200],
+      "retryOnFail": true,
+      "waitBetweenTries": 2000,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Process verification results\nconst verifyResults = $input.all();\nconst contacts = $('Has Email?').all();\n\nconst results = [];\n\nfor (let i = 0; i < contacts.length; i++) {\n  const contact = contacts[i].json;\n  const verification = verifyResults[i]?.json?.data || {};\n  \n  const status = verification.status || 'unknown';\n  const score = verification.score || 0;\n  \n  // Only keep valid/accept_all emails\n  const isValid = ['valid', 'accept_all'].includes(status);\n  \n  results.push({\n    ...contact,\n    email_verified: isValid,\n    email_status: status,\n    email_verification_score: score,\n    pipeline_stage: isValid ? 'email_verified' : 'email_invalid',\n    ready_for_research: isValid\n  });\n}\n\n// Filter to only verified emails\nreturn results\n  .filter(r => r.email_verified)\n  .map(r => ({ json: r }));"
+      },
+      "id": "process-verify-1",
+      "name": "Process Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [780, 200]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Contacts" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["full_name", "company_name"]
+        },
+        "options": {}
+      },
+      "id": "update-airtable-1",
+      "name": "Update Airtable - Verified Emails",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [1000, 200]
+    }
+  ],
+  "connections": {
+    "Webhook - Find Emails": {
+      "main": [[{ "node": "Generate Email Patterns", "type": "main", "index": 0 }]]
+    },
+    "Generate Email Patterns": {
+      "main": [[{ "node": "Batch Email Lookups", "type": "main", "index": 0 }]]
+    },
+    "Batch Email Lookups": {
+      "main": [
+        [
+          { "node": "Hunter.io Email Finder", "type": "main", "index": 0 },
+          { "node": "Snov.io Email Finder", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Hunter.io Email Finder": {
+      "main": [[{ "node": "Merge & Select Best Email", "type": "main", "index": 0 }]]
+    },
+    "Snov.io Email Finder": {
+      "main": [[{ "node": "Merge & Select Best Email", "type": "main", "index": 1 }]]
+    },
+    "Merge & Select Best Email": {
+      "main": [[{ "node": "Has Email?", "type": "main", "index": 0 }]]
+    },
+    "Has Email?": {
+      "main": [
+        [{ "node": "Verify Email", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Verify Email": {
+      "main": [[{ "node": "Process Verification", "type": "main", "index": 0 }]]
+    },
+    "Process Verification": {
+      "main": [[{ "node": "Update Airtable - Verified Emails", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Prospecting" }]
+}

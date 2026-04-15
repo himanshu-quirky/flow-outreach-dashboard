@@ -1,0 +1,130 @@
+{
+  "name": "10 - Deliverability & Health Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 12 }]
+        }
+      },
+      "id": "schedule-health-1",
+      "name": "Health Check Every 12hrs",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-800, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Check SmartLead campaign stats\nreturn [{ json: { action: 'check_stats', timestamp: new Date().toISOString() } }];"
+      },
+      "id": "prep-check-1",
+      "name": "Prepare Health Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://server.smartlead.ai/api/v1/campaigns/{{ $env.SMARTLEAD_CAMPAIGN_ID }}/analytics",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api_key", "value": "={{ $env.SMARTLEAD_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "smartlead-stats-1",
+      "name": "Fetch SmartLead Analytics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-360, 300],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Analyze campaign health metrics and flag issues\nconst stats = $input.first().json;\n\nconst totalSent = stats.total_sent || stats.sent_count || 0;\nconst totalOpened = stats.total_opened || stats.open_count || 0;\nconst totalReplied = stats.total_replied || stats.reply_count || 0;\nconst totalBounced = stats.total_bounced || stats.bounce_count || 0;\nconst totalSpam = stats.spam_count || 0;\n\nconst openRate = totalSent > 0 ? (totalOpened / totalSent * 100).toFixed(1) : 0;\nconst replyRate = totalSent > 0 ? (totalReplied / totalSent * 100).toFixed(1) : 0;\nconst bounceRate = totalSent > 0 ? (totalBounced / totalSent * 100).toFixed(1) : 0;\nconst spamRate = totalSent > 0 ? (totalSpam / totalSent * 100).toFixed(3) : 0;\n\n// Health assessment\nconst alerts = [];\n\nif (parseFloat(bounceRate) > 3) {\n  alerts.push({ severity: 'critical', metric: 'bounce_rate', value: `${bounceRate}%`, threshold: '3%', action: 'Pause campaign immediately. Clean email list. Check verification.' });\n}\n\nif (parseFloat(spamRate) > 0.1) {\n  alerts.push({ severity: 'critical', metric: 'spam_rate', value: `${spamRate}%`, threshold: '0.1%', action: 'STOP ALL SENDING. Review email copy. Check domain reputation.' });\n}\n\nif (parseFloat(openRate) < 25 && totalSent > 100) {\n  alerts.push({ severity: 'warning', metric: 'open_rate', value: `${openRate}%`, threshold: '25%', action: 'Check subject lines. Verify deliverability. Test with mail-tester.com' });\n}\n\nif (parseFloat(replyRate) < 2 && totalSent > 200) {\n  alerts.push({ severity: 'warning', metric: 'reply_rate', value: `${replyRate}%`, threshold: '2%', action: 'Review email copy. Check personalization quality. Consider ICP refinement.' });\n}\n\nconst overallHealth = alerts.some(a => a.severity === 'critical') ? 'CRITICAL'\n  : alerts.some(a => a.severity === 'warning') ? 'WARNING' \n  : 'HEALTHY';\n\nreturn [{\n  json: {\n    overall_health: overallHealth,\n    metrics: {\n      total_sent: totalSent,\n      total_opened: totalOpened,\n      total_replied: totalReplied,\n      total_bounced: totalBounced,\n      total_spam: totalSpam,\n      open_rate: `${openRate}%`,\n      reply_rate: `${replyRate}%`,\n      bounce_rate: `${bounceRate}%`,\n      spam_rate: `${spamRate}%`\n    },\n    alerts,\n    alert_count: alerts.length,\n    checked_at: new Date().toISOString(),\n    raw_stats: stats\n  }\n}];"
+      },
+      "id": "analyze-health-1",
+      "name": "Analyze Campaign Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.alert_count }}",
+              "rightValue": 0,
+              "operator": { "type": "number", "operation": "gt" }
+            }
+          ]
+        }
+      },
+      "id": "has-alerts-1",
+      "name": "Has Alerts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Format alert notification\nconst data = $input.first().json;\nconst alerts = data.alerts || [];\nconst metrics = data.metrics || {};\n\nlet message = `*Campaign Health: ${data.overall_health}*\\n\\n`;\nmessage += `*Metrics:*\\n`;\nmessage += `- Sent: ${metrics.total_sent}\\n`;\nmessage += `- Open Rate: ${metrics.open_rate}\\n`;\nmessage += `- Reply Rate: ${metrics.reply_rate}\\n`;\nmessage += `- Bounce Rate: ${metrics.bounce_rate}\\n`;\nmessage += `- Spam Rate: ${metrics.spam_rate}\\n\\n`;\n\nif (alerts.length > 0) {\n  message += `*ALERTS:*\\n`;\n  for (const alert of alerts) {\n    message += `[${alert.severity.toUpperCase()}] ${alert.metric}: ${alert.value} (threshold: ${alert.threshold})\\n`;\n    message += `  Action: ${alert.action}\\n\\n`;\n  }\n}\n\nreturn [{ json: { message, channel: 'harvey-sdr-alerts', overall_health: data.overall_health } }];"
+      },
+      "id": "format-alert-1",
+      "name": "Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 200]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Health Logs" },
+        "columns": { "mappingMode": "autoMapInputData" },
+        "options": {}
+      },
+      "id": "log-health-1",
+      "name": "Log Health Check",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [300, 400]
+    }
+  ],
+  "connections": {
+    "Health Check Every 12hrs": {
+      "main": [[{ "node": "Prepare Health Check", "type": "main", "index": 0 }]]
+    },
+    "Prepare Health Check": {
+      "main": [[{ "node": "Fetch SmartLead Analytics", "type": "main", "index": 0 }]]
+    },
+    "Fetch SmartLead Analytics": {
+      "main": [[{ "node": "Analyze Campaign Health", "type": "main", "index": 0 }]]
+    },
+    "Analyze Campaign Health": {
+      "main": [[{ "node": "Has Alerts?", "type": "main", "index": 0 }]]
+    },
+    "Has Alerts?": {
+      "main": [
+        [
+          { "node": "Format Alert", "type": "main", "index": 0 },
+          { "node": "Log Health Check", "type": "main", "index": 0 }
+        ],
+        [{ "node": "Log Health Check", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Monitoring" }]
+}

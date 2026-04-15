@@ -1,0 +1,173 @@
+{
+  "name": "07 - Follow-up Sequencer",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 6 }]
+        }
+      },
+      "id": "schedule-followup-1",
+      "name": "Check Follow-ups Every 6hrs",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-800, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Calculate which follow-ups are due today\n// Sequence: Day 0 (sent), Day 3 (FU1), Day 10 (FU2), Day 17 (Breakup)\nconst now = new Date();\nconst today = now.toISOString().split('T')[0];\n\nreturn [{\n  json: {\n    check_date: today,\n    now_iso: now.toISOString(),\n    // Follow-up schedule (days after initial send)\n    followup_schedule: {\n      2: { sequence_number: 2, name: 'Follow-up 1', days_after: 3 },\n      3: { sequence_number: 3, name: 'Follow-up 2', days_after: 10 },\n      4: { sequence_number: 4, name: 'Breakup', days_after: 17 }\n    }\n  }\n}];"
+      },
+      "id": "calc-schedule-1",
+      "name": "Calculate Schedule",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Emails" },
+        "filterByFormula": "AND({sent} = TRUE(), {sequence_number} = 1, NOT({replied}))",
+        "options": { "returnAll": true }
+      },
+      "id": "fetch-sent-1",
+      "name": "Fetch Sent Initial Emails",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Determine which contacts need follow-ups and which sequence number\nconst sentEmails = $input.all();\nconst staticData = $getWorkflowStaticData('global');\nconst respondedCompanies = staticData.respondedCompanies || {};\nconst now = new Date();\n\nconst followUps = [];\n\nfor (const item of sentEmails) {\n  const email = item.json;\n  const company = email.company_name?.toLowerCase() || '';\n  \n  // Skip if company already responded\n  if (respondedCompanies[company]) continue;\n  \n  // Skip if contact has replied\n  if (email.replied) continue;\n  \n  const sentDate = new Date(email.queued_at || email.actual_send_date || email.drafted_at);\n  const daysSinceSent = Math.floor((now - sentDate) / (1000 * 60 * 60 * 24));\n  \n  // Determine which follow-up is due\n  let dueSequence = null;\n  const lastSentSequence = email.last_sent_sequence || 1;\n  \n  if (lastSentSequence === 1 && daysSinceSent >= 3) {\n    dueSequence = 2; // Follow-up 1\n  } else if (lastSentSequence === 2 && daysSinceSent >= 10) {\n    dueSequence = 3; // Follow-up 2\n  } else if (lastSentSequence === 3 && daysSinceSent >= 17) {\n    dueSequence = 4; // Breakup\n  }\n  \n  if (dueSequence) {\n    followUps.push({\n      json: {\n        ...email,\n        due_sequence_number: dueSequence,\n        days_since_initial: daysSinceSent,\n        followup_type: dueSequence === 4 ? 'breakup' : `followup_${dueSequence - 1}`\n      }\n    });\n  }\n}\n\nreturn followUps.length > 0 ? followUps : [{ json: { no_followups_due: true } }];"
+      },
+      "id": "calc-due-followups-1",
+      "name": "Calculate Due Follow-ups",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            {
+              "leftValue": "={{ $json.no_followups_due }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "notEquals" }
+            }
+          ]
+        }
+      },
+      "id": "has-followups-1",
+      "name": "Has Follow-ups Due?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "operation": "search",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Emails" },
+        "filterByFormula": "=AND({thread_id} = '{{ $json.thread_id }}', {sequence_number} = {{ $json.due_sequence_number }})",
+        "options": {}
+      },
+      "id": "fetch-followup-draft-1",
+      "name": "Fetch Follow-up Draft",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://server.smartlead.ai/api/v1/campaigns/{{ $env.SMARTLEAD_CAMPAIGN_ID }}/leads/{{ $json.email }}/send",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api_key", "value": "={{ $env.SMARTLEAD_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"subject\": {{ JSON.stringify($json.subject) }},\n  \"body\": {{ JSON.stringify($json.body) }},\n  \"sequence_number\": {{ $json.due_sequence_number }}\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-followup-1",
+      "name": "Send Follow-up via SmartLead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [520, 300],
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 2,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// After sending follow-up, update tracking\nconst items = $input.all();\nreturn items.map(item => ({\n  json: {\n    thread_id: item.json.thread_id,\n    last_sent_sequence: item.json.due_sequence_number,\n    last_followup_sent_at: new Date().toISOString(),\n    status: item.json.due_sequence_number === 4 ? 'loop_closed' : 'followup_sent',\n    loop_closed: item.json.due_sequence_number === 4\n  }\n}));"
+      },
+      "id": "update-tracking-1",
+      "name": "Update Follow-up Tracking",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [740, 300]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Emails" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["thread_id"]
+        },
+        "options": {}
+      },
+      "id": "update-airtable-followup-1",
+      "name": "Update Airtable - Follow-up Status",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [960, 300]
+    }
+  ],
+  "connections": {
+    "Check Follow-ups Every 6hrs": {
+      "main": [[{ "node": "Calculate Schedule", "type": "main", "index": 0 }]]
+    },
+    "Calculate Schedule": {
+      "main": [[{ "node": "Fetch Sent Initial Emails", "type": "main", "index": 0 }]]
+    },
+    "Fetch Sent Initial Emails": {
+      "main": [[{ "node": "Calculate Due Follow-ups", "type": "main", "index": 0 }]]
+    },
+    "Calculate Due Follow-ups": {
+      "main": [[{ "node": "Has Follow-ups Due?", "type": "main", "index": 0 }]]
+    },
+    "Has Follow-ups Due?": {
+      "main": [
+        [{ "node": "Fetch Follow-up Draft", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Fetch Follow-up Draft": {
+      "main": [[{ "node": "Send Follow-up via SmartLead", "type": "main", "index": 0 }]]
+    },
+    "Send Follow-up via SmartLead": {
+      "main": [[{ "node": "Update Follow-up Tracking", "type": "main", "index": 0 }]]
+    },
+    "Update Follow-up Tracking": {
+      "main": [[{ "node": "Update Airtable - Follow-up Status", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Follow-up" }]
+}

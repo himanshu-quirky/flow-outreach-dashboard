@@ -1,0 +1,191 @@
+{
+  "name": "08 - Response Handler & Loop Closer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "email-response",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-response-1",
+      "name": "Webhook - Email Response",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-800, 300],
+      "webhookId": "email-response-webhook"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parse incoming response from SmartLead webhook\nconst items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const data = item.json.body || item.json;\n  \n  results.push({\n    json: {\n      // Response data\n      from_email: data.from_email || data.email || data.lead_email || '',\n      from_name: data.from_name || data.lead_name || '',\n      company_name: data.company_name || '',\n      subject: data.subject || '',\n      body: data.body || data.text || data.message || '',\n      reply_date: data.reply_date || data.received_at || new Date().toISOString(),\n      \n      // Campaign context\n      campaign_id: data.campaign_id || '',\n      sequence_id: data.sequence_id || '',\n      lead_id: data.lead_id || '',\n      \n      // Raw payload for debugging\n      raw_webhook: data\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-response-1",
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-580, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-api-key", "value": "={{ $env.ANTHROPIC_API_KEY }}" },
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"claude-haiku-4-5-20251001\",\n  \"max_tokens\": 512,\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Classify this email reply into ONE of these categories:\\n\\n1. POSITIVE - Interested, wants samples, wants to talk, asks questions about product\\n2. REFERRAL - Not the right person but refers to someone else\\n3. NOT_NOW - Interested but bad timing, ask to follow up later\\n4. OBJECTION - Has concerns but engagement shows interest (price, logistics, etc.)\\n5. NEGATIVE - Not interested, already has supplier, no need\\n6. UNSUBSCRIBE - Wants to be removed from list\\n7. OUT_OF_OFFICE - Auto-reply, OOO\\n8. BOUNCE - Delivery failure\\n\\nEmail reply:\\nFrom: {{ $json.from_name }} <{{ $json.from_email }}>\\nSubject: {{ $json.subject }}\\nBody: {{ $json.body }}\\n\\nReturn JSON only:\\n{\\n  \\\"category\\\": \\\"CATEGORY\\\",\\n  \\\"sentiment_score\\\": 1-10,\\n  \\\"summary\\\": \\\"one line summary\\\",\\n  \\\"suggested_action\\\": \\\"what should the sales team do next\\\",\\n  \\\"urgency\\\": \\\"high/medium/low\\\",\\n  \\\"referred_to\\\": \\\"name and email if referral, else null\\\"\\n}\"\n    }\n  ]\n}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "classify-response-1",
+      "name": "AI Classify Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-360, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Parse classification and determine actions\nconst items = $input.all();\nconst responses = $('Parse Response').all();\nconst staticData = $getWorkflowStaticData('global');\nstaticData.respondedCompanies = staticData.respondedCompanies || {};\n\nconst results = [];\n\nfor (let i = 0; i < items.length; i++) {\n  const response = items[i].json;\n  const originalResponse = responses[i]?.json || {};\n  const content = response.content?.[0]?.text || '';\n  \n  let classification = {};\n  try {\n    const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n    if (jsonMatch) classification = JSON.parse(jsonMatch[0]);\n  } catch (e) {\n    classification = { category: 'POSITIVE', sentiment_score: 5, summary: 'Classification failed', urgency: 'medium' };\n  }\n  \n  const company = originalResponse.company_name?.toLowerCase() || '';\n  \n  // CRITICAL: If ANY response from this company, stop all other sequences\n  if (['POSITIVE', 'REFERRAL', 'NOT_NOW', 'OBJECTION', 'NEGATIVE'].includes(classification.category)) {\n    staticData.respondedCompanies[company] = originalResponse.from_email;\n  }\n  \n  results.push({\n    json: {\n      ...originalResponse,\n      classification: classification.category,\n      sentiment_score: classification.sentiment_score,\n      summary: classification.summary,\n      suggested_action: classification.suggested_action,\n      urgency: classification.urgency,\n      referred_to: classification.referred_to,\n      company_sequences_stopped: ['POSITIVE', 'REFERRAL', 'NOT_NOW', 'OBJECTION', 'NEGATIVE'].includes(classification.category),\n      processed_at: new Date().toISOString()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "process-classification-1",
+      "name": "Process Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-140, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "rules": [
+            {
+              "conditions": {
+                "conditions": [{ "leftValue": "={{ $json.classification }}", "rightValue": "POSITIVE", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": "Positive"
+            },
+            {
+              "conditions": {
+                "conditions": [{ "leftValue": "={{ $json.classification }}", "rightValue": "REFERRAL", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": "Referral"
+            },
+            {
+              "conditions": {
+                "conditions": [{ "leftValue": "={{ $json.classification }}", "rightValue": "UNSUBSCRIBE", "operator": { "type": "string", "operation": "equals" } }],
+                "combinator": "and"
+              },
+              "renameOutput": "Unsubscribe"
+            }
+          ],
+          "fallbackOutput": "other"
+        },
+        "options": {}
+      },
+      "id": "route-response-1",
+      "name": "Route by Category",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [80, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": { "__rl": true, "mode": "url", "value": "={{ $env.AIRTABLE_BASE_ID }}" },
+        "tableId": { "__rl": true, "mode": "name", "value": "Responses" },
+        "columns": { "mappingMode": "autoMapInputData" },
+        "options": {}
+      },
+      "id": "save-response-1",
+      "name": "Save Response to Airtable",
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.1,
+      "position": [80, 100]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Stop all sequences for this company in SmartLead\nconst items = $input.all();\nreturn items.filter(i => i.json.company_sequences_stopped).map(item => ({\n  json: {\n    company_name: item.json.company_name,\n    responded_by: item.json.from_email,\n    action: 'stop_company_sequences'\n  }\n}));"
+      },
+      "id": "stop-sequences-1",
+      "name": "Stop Company Sequences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 100]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Handle referrals - add new contact to pipeline\nconst items = $input.all();\nreturn items.filter(i => i.json.referred_to).map(item => ({\n  json: {\n    referred_by: item.json.from_name,\n    referred_contact: item.json.referred_to,\n    company_name: item.json.company_name,\n    source: 'referral',\n    priority_tier: 'A',\n    pipeline_stage: 'referral_received'\n  }\n}));"
+      },
+      "id": "handle-referral-1",
+      "name": "Handle Referral",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [300, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://server.smartlead.ai/api/v1/campaigns/{{ $env.SMARTLEAD_CAMPAIGN_ID }}/leads/{{ $json.from_email }}/unsubscribe",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "api_key", "value": "={{ $env.SMARTLEAD_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "unsubscribe-1",
+      "name": "Unsubscribe in SmartLead",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [300, 500],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Webhook - Email Response": {
+      "main": [[{ "node": "Parse Response", "type": "main", "index": 0 }]]
+    },
+    "Parse Response": {
+      "main": [
+        [
+          { "node": "AI Classify Response", "type": "main", "index": 0 },
+          { "node": "Save Response to Airtable", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "AI Classify Response": {
+      "main": [[{ "node": "Process Classification", "type": "main", "index": 0 }]]
+    },
+    "Process Classification": {
+      "main": [
+        [
+          { "node": "Route by Category", "type": "main", "index": 0 },
+          { "node": "Stop Company Sequences", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Route by Category": {
+      "main": [
+        [{}],
+        [{ "node": "Handle Referral", "type": "main", "index": 0 }],
+        [{ "node": "Unsubscribe in SmartLead", "type": "main", "index": 0 }],
+        [{}]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Harvey SDR" }, { "name": "Response Handling" }]
+}
