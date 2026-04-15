@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 // CORS for Lovable frontend
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const allowed = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,https://flow-to-site-maker.lovable.app').split(',');
+  const allowed = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,https://flow-to-site-maker.lovable.app,https://flowoutreach.lovable.app').split(',');
   if (allowed.includes(origin) || allowed.includes('*')) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
