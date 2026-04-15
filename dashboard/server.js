@@ -7,8 +7,65 @@ const n8n = require('./n8n');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// CORS for Lovable frontend
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowed = (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,https://flow-to-site-maker.lovable.app').split(',');
+  if (allowed.includes(origin) || allowed.includes('*')) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-Webhook-Secret');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ---------- Auth ----------
+const crypto = require('crypto');
+
+app.post('/api/auth/signup', (req, res) => {
+  try {
+    const { email, password, name } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const existing = db.getSetting(`user:${email}`);
+    if (existing) return res.status(409).json({ error: 'Account already exists' });
+    const hash = crypto.createHash('sha256').update(password).digest('hex');
+    const token = crypto.randomBytes(32).toString('hex');
+    db.setSetting(`user:${email}`, JSON.stringify({ email, name: name || email.split('@')[0], hash, created: new Date().toISOString() }));
+    db.setSetting(`token:${token}`, email);
+    res.json({ token, user: { email, name: name || email.split('@')[0] } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!email || !password) return res.status(400).json({ error: 'Email and password required' });
+    const userData = db.getSetting(`user:${email}`);
+    if (!userData) return res.status(401).json({ error: 'Invalid credentials' });
+    const user = JSON.parse(userData);
+    const hash = crypto.createHash('sha256').update(password).digest('hex');
+    if (user.hash !== hash) return res.status(401).json({ error: 'Invalid credentials' });
+    const token = crypto.randomBytes(32).toString('hex');
+    db.setSetting(`token:${token}`, email);
+    res.json({ token, user: { email: user.email, name: user.name } });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const token = (req.headers.authorization || '').replace('Bearer ', '');
+  if (!token) return res.status(401).json({ error: 'Not authenticated' });
+  const email = db.getSetting(`token:${token}`);
+  if (!email) return res.status(401).json({ error: 'Invalid token' });
+  const userData = db.getSetting(`user:${email}`);
+  if (!userData) return res.status(401).json({ error: 'User not found' });
+  const user = JSON.parse(userData);
+  res.json({ email: user.email, name: user.name });
+});
 
 // ---------- SSE ----------
 const sseClients = [];

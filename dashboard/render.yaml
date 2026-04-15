@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: flow-outreach-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: N8N_API_URL
+        sync: false
+      - key: N8N_API_KEY
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false
