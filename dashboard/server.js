@@ -443,6 +443,175 @@ app.post('/api/webhook/domains', verifyWebhook, (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ---------- Brands ----------
+app.get('/api/brands', (req, res) => {
+  try { res.json(db.getBrands()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/brands/:id', (req, res) => {
+  try {
+    const brand = db.getBrand(+req.params.id);
+    if (!brand) return res.status(404).json({ error: 'Not found' });
+    res.json(brand);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/api/brands', (req, res) => {
+  try {
+    const data = {
+      user_email: req.body.user_email || null,
+      name: req.body.name,
+      website: req.body.website || '',
+      tagline: req.body.tagline || '',
+      usp: req.body.usp || '',
+      services: req.body.services || '',
+      tone: req.body.tone || 'Warm, confident, data-driven',
+      default_cta: req.body.default_cta || 'Worth a 15-min chat?',
+      from_email: req.body.from_email || '',
+      from_name: req.body.from_name || '',
+      signature: req.body.signature || '',
+      icp_industry: req.body.icp_industry || '',
+      icp_geography: req.body.icp_geography || '',
+      icp_company_size: req.body.icp_company_size || '',
+      icp_titles: req.body.icp_titles || '',
+      avoid_topics: req.body.avoid_topics || '',
+      proof_points: req.body.proof_points || '',
+      example_emails: req.body.example_emails || '',
+      daily_send_cap: req.body.daily_send_cap || 10,
+    };
+    const result = db.createBrand(data);
+    res.json(db.getBrand(result.lastInsertRowid));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.put('/api/brands/:id', (req, res) => {
+  try {
+    db.updateBrand(+req.params.id, req.body);
+    res.json(db.getBrand(+req.params.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------- Email send trigger ----------
+const fetchFn = require('node-fetch');
+
+app.post('/api/emails/:id/send', async (req, res) => {
+  try {
+    const email = db.getEmailById(+req.params.id);
+    if (!email) return res.status(404).json({ error: 'Email not found' });
+    if (email.status === 'sent') return res.status(400).json({ error: 'Already sent' });
+
+    // Get brand info for from_email
+    let brand = null;
+    if (email.brand_id) brand = db.getBrand(email.brand_id);
+    if (!brand) {
+      const brands = db.getBrands();
+      brand = brands[0]; // default to first brand
+    }
+
+    const n8nWebhook = `${process.env.N8N_API_URL || 'https://primary-production-2f66e.up.railway.app'}/webhook/send-email`;
+    const payload = {
+      email_id: email.id,
+      campaign_id: email.campaign_id,
+      to_email: email.contact_email,
+      to_name: email.contact_name,
+      subject: email.subject,
+      body: email.body,
+      from_brand: brand ? brand.name : 'Quirkyheads',
+      from_email: brand ? brand.from_email : 'himanshu@quirkyheads.co',
+      from_name: brand ? brand.from_name : 'Himanshu',
+      signature: brand ? brand.signature : '',
+    };
+
+    const resp = await fetchFn(n8nWebhook, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      timeout: 30000,
+    });
+
+    // Mark as queued
+    db.updateEmail(email.id, { status: 'queued' });
+    sendSSE('emailQueued', { id: email.id });
+    res.json({ ok: true, email_id: email.id, n8n_status: resp.status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------- New webhooks for Send/Monitor/Followup workflows ----------
+
+// Called by WF05 after Gmail send
+app.post('/api/webhook/email-sent', verifyWebhook, (req, res) => {
+  try {
+    const { email_id, gmail_message_id, gmail_thread_id, sent, error } = req.body;
+    if (sent && email_id) {
+      db.markEmailSent(email_id, { gmail_message_id, gmail_thread_id });
+      // Track thread ID for inbox monitor
+      const email = db.getEmailById(email_id);
+      if (email && email.brand_id && gmail_thread_id) {
+        db.addBrandThreadId(email.brand_id, gmail_thread_id);
+      } else if (gmail_thread_id) {
+        // No brand_id, add to default brand
+        const brands = db.getBrands();
+        if (brands[0]) db.addBrandThreadId(brands[0].id, gmail_thread_id);
+      }
+      sendSSE('statsUpdated', db.getStats());
+    } else if (email_id) {
+      db.updateEmail(email_id, { status: 'send_failed' });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Called by WF06 to check which thread IDs are ours
+app.post('/api/webhook/check-known-thread', verifyWebhook, (req, res) => {
+  try {
+    const { thread_ids } = req.body;
+    if (!Array.isArray(thread_ids)) return res.json({ known_thread_ids: [] });
+    const known = new Set(db.getAllKnownThreadIds());
+    const matched = thread_ids.filter(id => known.has(id));
+    res.json({ known_thread_ids: matched });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Called by WF07 after sending a follow-up
+app.post('/api/webhook/followup-sent', verifyWebhook, (req, res) => {
+  try {
+    const { email_id } = req.body;
+    if (email_id) db.markFollowupSent(email_id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Called by WF07 cron to fetch due follow-ups
+app.get('/api/followups/due', (req, res) => {
+  try {
+    const secret = req.headers['x-webhook-secret'];
+    if (process.env.NODE_ENV === 'production' && secret !== process.env.WEBHOOK_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const followups = db.getDueFollowups();
+    // Generate follow-up body for each (simple for now - AI gen can be added later)
+    const enriched = followups.map(e => {
+      const seq = (e.followup_sequence || 0) + 1;
+      const followupBody = seq === 1
+        ? `Hi ${(e.contact_name || '').split(' ')[0]},\n\nJust floating this back up. No reply needed if not a priority right now.\n\nI shared a quick idea on ${e.subject.toLowerCase()} a few days ago. Worth a 15-min chat?\n\nBest,\nHimanshu`
+        : seq === 2
+        ? `Hi ${(e.contact_name || '').split(' ')[0]},\n\nLast one from me on this.\n\nIf this isn't the right timing, totally get it. Would you be open to me reaching out in Q3 instead?\n\nBest,\nHimanshu`
+        : `Hi ${(e.contact_name || '').split(' ')[0]},\n\nClosing the loop here - I'll step back. If this ever becomes a priority, you've got my email.\n\nBest of luck with the business.\n\nHimanshu`;
+      return {
+        email_id: e.id,
+        original_gmail_message_id: e.gmail_message_id,
+        original_gmail_thread_id: e.gmail_thread_id,
+        to_email: e.contact_email,
+        contact_name: e.contact_name,
+        sequence_number: seq,
+        body: followupBody,
+      };
+    });
+    res.json({ followups: enriched, count: enriched.length });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ---------- Fallback to SPA ----------
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));

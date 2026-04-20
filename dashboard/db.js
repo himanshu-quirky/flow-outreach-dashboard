@@ -20,8 +20,35 @@ db.pragma('foreign_keys = ON');
 
 // Schema
 db.exec(`
+  CREATE TABLE IF NOT EXISTS brands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT,
+    name TEXT NOT NULL,
+    website TEXT,
+    tagline TEXT,
+    usp TEXT,
+    services TEXT,
+    tone TEXT DEFAULT 'Warm, confident, data-driven',
+    default_cta TEXT DEFAULT 'Worth a 15-min chat?',
+    from_email TEXT,
+    from_name TEXT,
+    signature TEXT,
+    gmail_thread_ids TEXT DEFAULT '[]',
+    icp_industry TEXT,
+    icp_geography TEXT,
+    icp_company_size TEXT,
+    icp_titles TEXT,
+    avoid_topics TEXT,
+    proof_points TEXT,
+    example_emails TEXT,
+    daily_send_cap INTEGER DEFAULT 10,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now'))
+  );
+
   CREATE TABLE IF NOT EXISTS campaigns (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER REFERENCES brands(id),
     name TEXT NOT NULL,
     status TEXT DEFAULT 'draft',
     icp_industry TEXT,
@@ -126,6 +153,7 @@ db.exec(`
     value TEXT
   );
 
+  CREATE INDEX IF NOT EXISTS idx_brands_user ON brands(user_email);
   CREATE INDEX IF NOT EXISTS idx_companies_campaign ON companies(campaign_id);
   CREATE INDEX IF NOT EXISTS idx_companies_tier ON companies(icp_tier);
   CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
@@ -149,7 +177,125 @@ for (const [k, v] of Object.entries(defaultSettings)) {
   upsertSetting.run(k, v);
 }
 
+// Safe ALTER TABLE migrations - add columns if they don't exist
+function addColumnIfMissing(table, column, definition) {
+  try {
+    const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!columns.find(c => c.name === column)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    }
+  } catch (e) { /* ignore */ }
+}
+
+addColumnIfMissing('campaigns', 'brand_id', 'INTEGER');
+addColumnIfMissing('emails', 'brand_id', 'INTEGER');
+addColumnIfMissing('emails', 'gmail_message_id', 'TEXT');
+addColumnIfMissing('emails', 'gmail_thread_id', 'TEXT');
+addColumnIfMissing('emails', 'next_followup_day', 'INTEGER DEFAULT 3');
+addColumnIfMissing('emails', 'followup_sequence', 'INTEGER DEFAULT 0');
+addColumnIfMissing('responses', 'gmail_message_id', 'TEXT');
+addColumnIfMissing('responses', 'gmail_thread_id', 'TEXT');
+addColumnIfMissing('contacts', 'brand_id', 'INTEGER');
+addColumnIfMissing('companies', 'brand_id', 'INTEGER');
+
+// Seed Quirkyheads brand if it doesn't exist
+const quirkyheadsExists = db.prepare('SELECT id FROM brands WHERE name = ?').get('Quirkyheads');
+if (!quirkyheadsExists) {
+  db.prepare(`INSERT INTO brands (name, website, tagline, usp, services, tone, default_cta, from_email, from_name, signature, icp_industry, icp_geography, icp_company_size, icp_titles, avoid_topics, proof_points, daily_send_cap)
+    VALUES (@name, @website, @tagline, @usp, @services, @tone, @default_cta, @from_email, @from_name, @signature, @icp_industry, @icp_geography, @icp_company_size, @icp_titles, @avoid_topics, @proof_points, @daily_send_cap)`).run({
+    name: 'Quirkyheads',
+    website: 'https://quirkyheads.co',
+    tagline: 'Shopify-only D2C agency. Craft over speed.',
+    usp: 'Shopify Select Partner. 170+ D2C brands over 6 years. Deep expertise in Shopify 2.0/Liquid, Core Web Vitals, CRO, paid ads, and Amazon/Walmart storefront ops. We teach your team to run the store.',
+    services: 'Shopify development, redesigns, migrations, B2B Shopify, marketplace operations (Amazon, Walmart), Meta/Google Ads, CRO audits, AI automation, staff training',
+    tone: 'Warm, confident, and specific. No jargon. Observational. Write like a senior practitioner, not a salesperson.',
+    default_cta: 'Worth a 15-min chat?',
+    from_email: 'himanshu@quirkyheads.co',
+    from_name: 'Himanshu',
+    signature: 'Himanshu\nWebsite Growth / CRO\nQuirkyheads | quirkyheads.co',
+    icp_industry: 'D2C brands on Shopify - stationery, apparel, beauty, home goods, accessories',
+    icp_geography: 'US, UK, India, Canada, Australia',
+    icp_company_size: '$500K-$10M annual revenue, 2-50 employees',
+    icp_titles: 'Founder, Co-founder, CEO, CMO, Head of E-commerce, Head of Digital, Growth Lead',
+    avoid_topics: 'Generic agency pitches, overpromising, cold discount offers, copying competitor language',
+    proof_points: 'Shopify Select Partner (2023). 170+ D2C brands. Clients include Amicreative, Happy Threads, Pomp Flowers. 98% client satisfaction. 6+ years Shopify-exclusive.',
+    daily_send_cap: 10
+  });
+}
+
 module.exports = {
+  // Brands
+  getBrands: () => db.prepare('SELECT * FROM brands ORDER BY created_at DESC').all(),
+  getBrand: (id) => db.prepare('SELECT * FROM brands WHERE id = ?').get(id),
+  getBrandByName: (name) => db.prepare('SELECT * FROM brands WHERE name = ?').get(name),
+  createBrand: (data) => {
+    const stmt = db.prepare(`INSERT INTO brands (user_email, name, website, tagline, usp, services, tone, default_cta, from_email, from_name, signature, icp_industry, icp_geography, icp_company_size, icp_titles, avoid_topics, proof_points, example_emails, daily_send_cap)
+      VALUES (@user_email, @name, @website, @tagline, @usp, @services, @tone, @default_cta, @from_email, @from_name, @signature, @icp_industry, @icp_geography, @icp_company_size, @icp_titles, @avoid_topics, @proof_points, @example_emails, @daily_send_cap)`);
+    return stmt.run(data);
+  },
+  updateBrand: (id, data) => {
+    const allowed = ['name','website','tagline','usp','services','tone','default_cta','from_email','from_name','signature','icp_industry','icp_geography','icp_company_size','icp_titles','avoid_topics','proof_points','example_emails','daily_send_cap','gmail_thread_ids'];
+    const fields = Object.keys(data).filter(k => allowed.includes(k));
+    if (fields.length === 0) return { changes: 0 };
+    const setClause = fields.map(k => `${k} = @${k}`).join(', ');
+    const params = { id };
+    for (const k of fields) params[k] = data[k];
+    return db.prepare(`UPDATE brands SET ${setClause}, updated_at = datetime('now') WHERE id = @id`).run(params);
+  },
+  addBrandThreadId: (brandId, threadId) => {
+    const brand = db.prepare('SELECT gmail_thread_ids FROM brands WHERE id = ?').get(brandId);
+    if (!brand) return;
+    let ids = [];
+    try { ids = JSON.parse(brand.gmail_thread_ids || '[]'); } catch {}
+    if (!ids.includes(threadId)) {
+      ids.push(threadId);
+      db.prepare('UPDATE brands SET gmail_thread_ids = ? WHERE id = ?').run(JSON.stringify(ids), brandId);
+    }
+  },
+  getAllKnownThreadIds: () => {
+    const rows = db.prepare('SELECT gmail_thread_ids FROM brands').all();
+    const all = new Set();
+    for (const r of rows) {
+      try {
+        const ids = JSON.parse(r.gmail_thread_ids || '[]');
+        for (const id of ids) all.add(id);
+      } catch {}
+    }
+    return Array.from(all);
+  },
+
+  // Email sending + tracking
+  markEmailSent: (id, data) => {
+    return db.prepare(`UPDATE emails SET status = 'sent', sent_at = datetime('now'), gmail_message_id = @gmail_message_id, gmail_thread_id = @gmail_thread_id WHERE id = @id`)
+      .run({ id, gmail_message_id: data.gmail_message_id || null, gmail_thread_id: data.gmail_thread_id || null });
+  },
+  getEmailById: (id) => db.prepare('SELECT * FROM emails WHERE id = ?').get(id),
+  markEmailReplied: (threadId) => {
+    return db.prepare(`UPDATE emails SET status = 'replied', replied_at = datetime('now') WHERE gmail_thread_id = ?`).run(threadId);
+  },
+  getDueFollowups: () => {
+    // Find sent emails where next_followup_day has passed and no reply received
+    // Follow-up sequence: Day 3, Day 10, Day 17
+    const sql = `
+      SELECT e.*
+      FROM emails e
+      WHERE e.status = 'sent'
+        AND e.replied_at IS NULL
+        AND e.followup_sequence < 3
+        AND CAST((julianday('now') - julianday(e.sent_at)) AS INTEGER) >= e.next_followup_day
+      ORDER BY e.sent_at ASC
+      LIMIT 20
+    `;
+    return db.prepare(sql).all();
+  },
+  markFollowupSent: (id) => {
+    const row = db.prepare('SELECT followup_sequence FROM emails WHERE id = ?').get(id);
+    if (!row) return;
+    const nextSeq = (row.followup_sequence || 0) + 1;
+    const nextDay = [3, 10, 17][nextSeq] || 99;
+    db.prepare('UPDATE emails SET followup_sequence = ?, next_followup_day = ? WHERE id = ?').run(nextSeq, nextDay, id);
+  },
+
   // Campaigns
   getCampaigns: () => db.prepare('SELECT * FROM campaigns ORDER BY created_at DESC').all(),
   getCampaign: (id) => db.prepare('SELECT * FROM campaigns WHERE id = ?').get(id),
